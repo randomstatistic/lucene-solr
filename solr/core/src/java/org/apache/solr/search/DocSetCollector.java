@@ -18,6 +18,7 @@ package org.apache.solr.search;
  */
 
 import java.io.IOException;
+import java.util.ArrayList;
 
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.Scorer;
@@ -38,7 +39,7 @@ public class DocSetCollector extends SimpleCollector {
   // in case there aren't that many hits, we may not want a very sparse
   // bit array.  Optimistically collect the first few docs in an array
   // in case there are only a few.
-  final int[] scratch;
+  final ExpandingIntArray scratch;
 
   public DocSetCollector(int maxDoc) {
     this(DocSetUtil.smallSetSize(maxDoc), maxDoc);
@@ -47,7 +48,7 @@ public class DocSetCollector extends SimpleCollector {
   public DocSetCollector(int smallSetSize, int maxDoc) {
     this.smallSetSize = smallSetSize;
     this.maxDoc = maxDoc;
-    this.scratch = new int[smallSetSize];
+    this.scratch = new ExpandingIntArray();
   }
 
   @Override
@@ -60,8 +61,8 @@ public class DocSetCollector extends SimpleCollector {
     // than scanning through a potentially huge bit vector.
     // FUTURE: when search methods all start returning docs in order, maybe
     // we could have a ListDocSet() and use the collected array directly.
-    if (pos < scratch.length) {
-      scratch[pos]=doc;
+    if (pos < smallSetSize) {
+      scratch.add(pos, doc);
     } else {
       // this conditional could be removed if BitSet was preallocated, but that
       // would take up more memory, and add more GC time...
@@ -73,12 +74,12 @@ public class DocSetCollector extends SimpleCollector {
   }
 
   public DocSet getDocSet() {
-    if (pos<=scratch.length) {
+    if (pos<=scratch.size()) {
       // assumes docs were collected in sorted order!
-      return new SortedIntDocSet(scratch, pos);
+      return new SortedIntDocSet(scratch.toArray(), pos);
     } else {
       // set the bits for ids that were collected in the array
-      for (int i=0; i<scratch.length; i++) bits.set(scratch[i]);
+      scratch.copyTo(bits);
       return new BitDocSet(bits,pos);
     }
   }
@@ -95,5 +96,65 @@ public class DocSetCollector extends SimpleCollector {
   @Override
   protected void doSetNextReader(LeafReaderContext context) throws IOException {
     this.base = context.docBase;
+  }
+
+  protected static class ExpandingIntArray {
+
+    private ArrayList<int[]> arrays = null;
+    private int[] currentAddArray = null;
+    private int indexForNextAddInCurrentAddArray = -1;
+    private int size = 0;
+
+    public void add(int index, int value) {
+      if (index != size) throw new IllegalArgumentException("Appending only suppported");
+
+      if (arrays == null) arrays = new ArrayList<int[]>(10);
+      if (currentAddArray == null) {
+        currentAddArray = new int[10];
+        arrays.add(currentAddArray);
+        indexForNextAddInCurrentAddArray = 0;
+      }
+      if (indexForNextAddInCurrentAddArray >= currentAddArray.length) {
+        currentAddArray = new int[currentAddArray.length * 2];
+        arrays.add(currentAddArray);
+        indexForNextAddInCurrentAddArray = 0;
+      }
+      currentAddArray[indexForNextAddInCurrentAddArray++] = value;
+      size++;
+    }
+
+    public void copyTo(FixedBitSet bits) {
+      if (size > 0) {
+        int resultPos = 0;
+        for (int i = 0; i < arrays.size(); i++) {
+          int[] srcArray = arrays.get(i);
+          int intsToCopy = (i < (arrays.size() - 1)) ? srcArray.length : indexForNextAddInCurrentAddArray;
+          for (int j = 0; j < intsToCopy; j++) {
+            bits.set(srcArray[j]);
+          }
+          resultPos += intsToCopy;
+        }
+        assert resultPos == size;
+      }
+    }
+
+    public int[] toArray() {
+      int[] result = new int[size];
+      if (size > 0) {
+        int resultPos = 0;
+        for (int i = 0; i < arrays.size(); i++) {
+          int[] srcArray = arrays.get(i);
+          int intsToCopy = (i < (arrays.size() - 1)) ? srcArray.length : indexForNextAddInCurrentAddArray;
+          System.arraycopy(srcArray, 0, result, resultPos, intsToCopy);
+          resultPos += intsToCopy;
+        }
+        assert resultPos == size;
+      }
+      return result;
+    }
+
+    public int size() {
+      return size;
+    }
   }
 }
